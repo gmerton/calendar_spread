@@ -45,6 +45,7 @@ def filter_dates(dates):
 
 
 def yang_zhang(price_data, window=30, trading_periods=252, return_last_only=True):
+    print("Price data", price_data);
     log_ho = (price_data['High'] / price_data['Open']).apply(np.log)
     log_lo = (price_data['Low'] / price_data['Open']).apply(np.log)
     log_co = (price_data['Close'] / price_data['Open']).apply(np.log)
@@ -200,7 +201,8 @@ def compute_recommendation(ticker):
         avg_volume = price_history['Volume'].rolling(30).mean().dropna().iloc[-1]
 
         expected_move = str(round(straddle / underlying_price * 100,2)) + "%" if straddle else None
-
+        print("iv30_rv30", iv30_rv30)
+        print("ts_slope_0_45", ts_slope_0_45)
         return {'avg_volume': avg_volume >= 1500000, 'iv30_rv30': iv30_rv30 >= 1.25, 'ts_slope_0_45': ts_slope_0_45 <= -0.00406, 'expected_move': expected_move} #Check that they are in our desired range (see video)
     except Exception as e:
         import traceback
