@@ -2,4 +2,6 @@ FreeSimpleGUI==5.1.1
 numpy==2.1
 scipy==1.15.1
 yfinance==0.2.54
-ib-insync
+# ib-insync
+ib-async
+aiohttp

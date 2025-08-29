@@ -1,39 +1,204 @@
 # runner_ib_price.py
-from ib_insync import IB
-from datetime import datetime
-from ib_insync import Stock, Option, util
+from datetime import datetime, timedelta, timezone
+import time
+# from ib_insync import IB, Stock, Option, util
+from ib_async import IB, Stock, Option, MarketOrder, LimitOrder, Contract, ContractDetails, util
+import asyncio
 from typing import List, Dict, Optional, Tuple
 import math
+import pandas as pd
+
+
+
+from commons import mid, yang_zhang, build_term_structure, filter_dates, nearest_strike_contract
+
+MINIMUM_VOLUME = 1_500_000
+MINIMUM_IV_RV_RATIO = 1.25
+MAXIMUM_TERM_STRUCTURE_SLOPE = -0.00406
 # --- paste your get_underlying_price_ib(...) here or import it ---
 # from yourmodule import get_underlying_price_ib
 
-def _get_underlying_price(ib: IB, ticker: str, exchange: str = "SMART", timeout_sec: float = 2.0) -> Optional[float]:
-    from ib_insync import Stock
-    contract = Stock(ticker, exchange, "USD")
-    ib.qualifyContracts(contract)
-    tk = ib.reqMktData(contract, snapshot=True)
-    ib.sleep(2)
-    deadline = util.time.time() + timeout_sec
-    while util.time.time() < deadline and not any([tk.bid, tk.ask, tk.last, tk.close]):
-        ib.sleep(0.1)
+async def _get_underlying_price(
+    ib: IB,
+    ticker: str,
+    exchange: str = "SMART",
+    timeout_sec: float = 3.0
+) -> Optional[float]:
+    """
+    Returns mid(bid,ask), falling back to last or close, else None.
+    No historical fallback; hard timeouts at each step.
+    """
+    # 1) Resolve a fully-qualified contract (includes primaryExchange)
+    try:
+        cds = await asyncio.wait_for(
+            ib.reqContractDetailsAsync(Stock(ticker, exchange, "USD")),
+            timeout=timeout_sec
+        )
+    except asyncio.TimeoutError:
+        return None
 
-    if tk.bid and tk.ask and tk.bid > 0 and tk.ask > 0:
-        return float((tk.bid + tk.ask) / 2.0)
-    if tk.last and tk.last > 0:
-        return float(tk.last)
-    if tk.close and tk.close > 0:
-        return float(tk.close)
+    if not cds:
+        return None
 
-    bars = ib.reqHistoricalData(
-        contract, endDateTime=datetime.now(), durationStr="2 D",
-        barSizeSetting="1 day", whatToShow="TRADES", useRTH=False, formatDate=1
-    )
-    if bars:
-        return float(bars[-1].close)
-    return None
+    contract = cds[0].contract
+    # 2) Qualify (guarantees a tradable/quoteable conId)
+    try:
+        [contract] = await asyncio.wait_for(
+            ib.qualifyContractsAsync(contract),
+            timeout=timeout_sec
+        )
+    except asyncio.TimeoutError:
+        return None
 
-from typing import List, Dict
-from ib_insync import IB, Stock
+    # 3) Snapshot request (one-shot). Give it a moment to populate fields.
+    try:
+        tk = await asyncio.wait_for(
+            ib.reqMktDataAsync(contract, genericTickList="", snapshot=True),
+            timeout=timeout_sec
+        )
+    except asyncio.TimeoutError:
+        return None
+
+    try:
+        await asyncio.sleep(0.3)
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline and not any([tk.bid, tk.ask, tk.last, tk.close]):
+            # If data is delayed/live, ticks may trickle in
+            await ib.waitOnUpdateAsync(timeout=0.25)
+
+        # 4) Pick the best available price
+        if tk.bid and tk.ask and tk.bid > 0 and tk.ask > 0:
+            return float((tk.bid + tk.ask) / 2.0)
+        if tk.last and tk.last > 0:
+            return float(tk.last)
+        if tk.close and tk.close > 0:
+            return float(tk.close)
+        return None
+    finally:
+        # For snapshots this is usually unnecessary, but safe to cancel
+        ib.cancelMktData(contract)
+
+  
+                
+def compute_recommendation(ib, ticker, max_expiries=6):
+    print(f"Computing recommendation for {ticker}")
+    try:
+        symbol = (ticker or "").strip().upper()
+        if not symbol:
+            return "No stock symbol provided."
+
+        # 1) Get current stock price
+        spot = _get_underlying_price(ib, symbol)  # assumes your IB version
+        print(f"1. Underlying price = {spot}")
+        if spot is None:
+            return "Error: unable to retrieve stock price"
+        
+        # 2) Expirations -> Filter -> cap
+        expirations = _list_expirations(ib, symbol)  # returns e.g. ['YYYY-MM-DD', ...]
+        if not expirations:
+            return f"Error: no options found for symbol {symbol}"
+        try:
+            exp_dates = filter_dates(expirations)
+        except Exception:
+            return "Error: not enough option data"
+        exp_dates = exp_dates[:max_expiries]
+        print(f"2. Retrieved expiration dates within the next 45 days")
+        
+        # 3) For each expiry, choose ATM call/put and fetch bid/ask and IV
+        atm_iv = {}
+        straddle_mid = None
+        for i, exp in enumerate(exp_dates):
+            print(f"3. {i}, {exp}")
+            contracts = _list_contracts_for_expiry(ib, symbol, exp)  
+            if not contracts:
+                continue
+
+            call_ctr = nearest_strike_contract(contracts, spot, "call")
+            put_ctr  = nearest_strike_contract(contracts, spot, "put")
+
+            print(f"Nearest strike contract for {exp}", call_ctr)
+
+            if not call_ctr or not put_ctr:
+                continue
+
+            print(f"Found nearest strike (in abs val) contracts for exp {exp}")
+            # ✅ updated calls: (ib, symbol, expiry, strike, right)
+            c_bid, c_ask, c_iv = _get_option_quote_greeks(ib, symbol, exp, call_ctr["strike"], "C")
+            p_bid, p_ask, p_iv = _get_option_quote_greeks(ib, symbol, exp, put_ctr["strike"], "P")
+
+            print("Implied volatilties", c_iv, p_iv)
+
+            # compute mids for earliest expiry for the straddle
+            if i == 0:
+                c_mid = mid(c_bid, c_ask)
+                p_mid = mid(p_bid, p_ask)
+                if c_mid is not None and p_mid is not None:
+                    straddle_mid = c_mid + p_mid
+            if c_iv is not None and p_iv is not None:
+                atm_iv[exp] = (c_iv + p_iv) / 2.0;
+            
+            print(f"Implied volatilities", atm_iv)
+            # Be polite to rate limits
+            time.sleep(0.08)
+        if not atm_iv:
+            print("errror 1`")
+            return "Error: Could not determin ATM IV for any expiration dates"
+        print(f"3. atm_iv={atm_iv}")
+
+        # 4) Build term structure spline and slope
+        today = datetime.now(timezone.utc).date()
+        dtes, ivs = [], []
+        for exp, iv in atm_iv.items():
+            d=datetime.strptime(exp, "%Y-%m-%d").date()
+            dtes.append((d-today).days)
+            ivs.append(float(iv))
+
+        if len(dtes)<2:
+            return "Error: Not enough expirations to build term structure."
+        term_spline = build_term_structure(dtes,ivs);
+        ts_slope_0_45 = (term_spline(45) - term_spline(min(dtes))) / (45-min(dtes))
+
+        print(f"4. ts_slope_0_45=${ts_slope_0_45}")
+
+        # 5) Daily OHLCV (~3 months) for Yang-Zhang + avg vol
+        price_history = _get_stock_history_df(ib, symbol, days=100)
+        if price_history.empty:
+            return "Error: no historical data"
+        iv30_rv30 = term_spline(30) / yang_zhang(price_history)
+        avg_volume = price_history["Volume"].rolling(30).mean().dropna().iloc[-1]
+        expected_move = f"{round(straddle_mid / spot * 100, 2)}%" if straddle_mid else None
+
+        print("")
+        if avg_volume>=MINIMUM_VOLUME:
+            print(f"GREEN.  Avg volume of {round(avg_volume)} exceeds the minimum of {MINIMUM_VOLUME}")
+        else:
+            print(f"RED.  Avg volume of {round(avg_volume)} is below the minimum of {MINIMUM_VOLUME}")
+
+        if iv30_rv30 >= MINIMUM_IV_RV_RATIO:
+            print(f"GREEN. iv-to-rv of {iv30_rv30} exceeds the minimum of {MINIMUM_IV_RV_RATIO}")
+        else:
+            print(f"RED. iv_to_rv of {iv30_rv30} is below the minimum of {MINIMUM_IV_RV_RATIO}")
+
+        if ts_slope_0_45<=MAXIMUM_TERM_STRUCTURE_SLOPE:
+            print(f"GREEN.  Term structure slope of {ts_slope_0_45} falls below the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
+        else:
+            print(f"RED.  Term structure slope of {ts_slope_0_45} exceeds the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
+        print("")
+
+        resultPackage = {
+                "avg_volume" : avg_volume>=MINIMUM_VOLUME,
+                "iv30_rv30" : iv30_rv30 >= MINIMUM_IV_RV_RATIO,
+                "ts_slope_0_45" : ts_slope_0_45 <= MAXIMUM_TERM_STRUCTURE_SLOPE,
+                "expected_move": expected_move
+            }
+            
+        print(resultPackage)
+
+        return resultPackage;
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"{ticker}: Processing failed: {e}"
 
 def _list_contracts_for_expiry(ib: IB, ticker: str, expiry: str, exchange: str = "SMART") -> List[Dict]:
     """
@@ -110,101 +275,7 @@ def _list_contracts_for_expiry(ib: IB, ticker: str, expiry: str, exchange: str =
 
 
 
-def connect_ib_client(client_id=42):
-    ib = IB()
-    # Connect to Gateway live first
-    ib.connect("127.0.0.1", 4001, clientId=client_id, timeout=8)
 
-    # Try LIVE data
-    #ib.reqMarketDataType(1)  # 1 = real-time
-    ib.reqMarketDataType(1)  # 3 = delayed data
-    
-    return ib
-    
-    # price = get_underlying_price_ib(ib, symbol)
-    #if price is None:
-        # Fall back to DELAYED if you lack live subs
-    #    ib.reqMarketDataType(3)  # 3 = delayed
-    #    price = get_underlying_price_ib(ib, symbol)
-
-    # print(f"{symbol} price:", price)
-    # ib.disconnect()
-
-def disconnect_ib_client(ib):
-    ib.disconnect()
-
-
-
-
-
-def _get_option_quote_greeks_2(
-    ib: IB,
-    symbol: str,                  # e.g. "AMZN"
-    expiry: str,                  # "YYYYMMDD" or "YYYY-MM-DD"
-    strike: float,                # e.g. 232.5
-    right: str,                   # "C" or "P"
-    exchange: str = "SMART",
-    timeout_sec: float = 6.0,
-    cancel_after: bool = True
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Live OPRA path: returns (bid, ask, iv) without fixed sleeps.
-    Requires:
-      ib.reqMarketDataType(1) and an OPRA subscription.
-    """
-
-    # Normalize expiry to YYYYMMDD
-    exp = expiry.replace("-", "")
-    if len(exp) not in (6, 8):
-        raise ValueError(f"Unexpected expiry format: {expiry} (use YYYYMMDD or YYYY-MM-DD)")
-
-    # 1) Build & qualify the contract
-    opt = Option(symbol, exp, float(strike), right.upper(), exchange)
-    ib.qualifyContracts(opt)
-
-    # 2) Start streaming with option computations
-    tk = ib.reqMktData(opt, genericTickList="106", snapshot=False)
-
-    # 3) Event-driven wait: update on *this* ticker only
-    bid = ask = iv = None
-
-    def clean(x):
-        return None if (x is None or (isinstance(x, float) and math.isnan(x))) else float(x)
-
-    def on_update(updated_tk):
-        nonlocal bid, ask, iv
-        # Quotes
-        if bid is None:
-            bid = clean(updated_tk.bid)
-        if ask is None:
-            ask = clean(updated_tk.ask)
-        # Greeks buckets: prefer model IV, but accept others if that’s what arrives first
-        if iv is None:
-            if getattr(updated_tk, "modelGreeks", None) and updated_tk.modelGreeks.impliedVol is not None:
-                iv = float(updated_tk.modelGreeks.impliedVol)
-            elif getattr(updated_tk, "bidGreeks", None) and updated_tk.bidGreeks.impliedVol is not None:
-                iv = float(updated_tk.bidGreeks.impliedVol)
-            elif getattr(updated_tk, "askGreeks", None) and updated_tk.askGreeks.impliedVol is not None:
-                iv = float(updated_tk.askGreeks.impliedVol)
-            elif getattr(updated_tk, "lastGreeks", None) and updated_tk.lastGreeks.impliedVol is not None:
-                iv = float(updated_tk.lastGreeks.impliedVol)
-            elif getattr(updated_tk, "closeGreeks", None) and updated_tk.closeGreeks.impliedVol is not None:
-                iv = float(updated_tk.closeGreeks.impliedVol)
-
-    # attach handler
-    tk.updateEvent += on_update
-
-    try:
-        # Wait until we have *something useful* or we time out
-        ib.waitUntil(lambda: (bid is not None) or (ask is not None) or (iv is not None),
-                     timeout=timeout_sec)
-    finally:
-        # Always detach handler
-        tk.updateEvent -= on_update
-        if cancel_after:
-            ib.cancelMktData(opt)
-
-    return bid, ask, iv
 
 def _get_option_quote_greeks(
     ib: IB,
@@ -239,7 +310,7 @@ def _get_option_quote_greeks(
     bid = ask = iv = None
 
     while util.time.time() < deadline:
-        ib.waitOnUpdate(timeout=0.25)  # wait for real ticks
+        ib.waitOnUpdate(timeout=1)  # wait for real ticks
 
         # Quotes
         if bid is None: bid = clean(tk.bid)
@@ -279,11 +350,6 @@ def _get_option_quote_greeks(
 
     return bid, ask, iv
 
-
-import pandas as pd
-from datetime import datetime
-from typing import Optional
-from ib_insync import IB, Stock, util
 
 def _get_stock_history_df(
     ib: IB,
@@ -376,13 +442,13 @@ def _list_expirations(ib: IB, ticker: str, exchange: str = "SMART") -> List[str]
     return exps
 
 
-def testGetUnderlyingPrice():
+async def testGetUnderlyingPrice():
     print("test get underlying price")
     symbol = "AMZN"
-    ib = connect_ib_client()
-    price = _get_underlying_price(ib, symbol)
+    ib = await connect_ib_client()
+    price = await _get_underlying_price(ib, symbol)
     print(f"{symbol} price:", price)
-    disconnect_ib_client(ib)
+    await disconnect_ib_client(ib)
 
 def testListExpirations():
     print("test expirations")
@@ -406,30 +472,37 @@ def testGetGreeks():
     print("Bid:", bid, "Ask:", ask, "IV:", iv)
     disconnect_ib_client(ib)
 
+async def testConnection():
+    ib = await connect_ib_client();
+    await disconnect_ib_client(ib)
 
+async def connect_ib_client(client_id=43):
+    ib = IB()
+    # Connect to Gateway live first
+    await ib.connectAsync("127.0.0.1", 4001, clientId=client_id, timeout=8)
+
+    # Try LIVE data
+    #ib.reqMarketDataType(1)  # 1 = real-time
+    ib.reqMarketDataType(3)  # 3 = delayed data
+    
+    return ib
+   
+async def disconnect_ib_client(ib):
+    ib.disconnect()
 
 if __name__ == "__main__":
-    
-    testGetGreeks()
-    # symbol = "AMZN"
+    symbol = "AMZN"
+    print(f"starting test")
+    ib = asyncio.run(connect_ib_client())
+    print(f"client retrieved")
+    price = asyncio.run(_get_underlying_price(ib, symbol))
+    print("retrieved price")
+    print(f"{symbol} price:", price)
+    asyncio.run(disconnect_ib_client(ib))
+    print("disconnected client")
+    # asyncio.run(testConnection())
+    # asyncio.run(testGetUnderlyingPrice())
+    # testGetGreeks()
     # ib = connect_ib_client()
-    # price = _get_underlying_price(ib, symbol)
-    # print(f"{symbol} price:", price)
-    # expirations = _list_expirations(ib, symbol)
-    # print(expirations)
-    
-    # contracts = _list_contracts_for_expiry(ib, "AMZN", "2025-09-05")
-    # print(contracts[:6])  # first few rows: [{'ticker': 'AMZN  250829C00....', 'strike': ..., 'type': 'call'}, ...]
-
-    # call_tkr = "AMZN  250905C00230000"
-    # put_tkr  = "AMZN  250905P00230000"
-
-    # bid, ask, iv = _get_option_quote_greeks(ib, "AMZN", "20250829", 232.5, "C", timeout_sec=4.0)
-    # print("Bid:", bid, "Ask:", ask, "IV:", iv)
-    # bid, ask, iv = _get_option_quote_greeks(ib, "AMZN  250829C00232500")
-    # print(bid, ask, iv)
-
-    # df = _get_stock_history_df(ib, "AMZN", days=100)
-    # print(df.tail())
-
+    # compute_recommendation(ib, "AMZN")
     # disconnect_ib_client(ib)

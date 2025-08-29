@@ -6,7 +6,7 @@ import sys
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from commons import yang_zhang, build_term_structure, filter_dates, nearest_strike_contract
+from commons import mid, yang_zhang, build_term_structure, filter_dates, nearest_strike_contract
 
 POLYGON_API_KEY=os.getenv("POLYGON_API_KEY")
 BASE_V3 = "https://api.polygon.io/v3"
@@ -107,7 +107,7 @@ def _get_option_quote_greeks(underlying: str, option_ticker: str):
 
 
 
-def _mid(bid, ask):
+def mid(bid, ask):
     return (bid+ask)/2.0 if (bid and ask and bid>0 and ask>0) else None
 
 def compute_recommendation(ticker, max_expiries=6):
@@ -154,8 +154,8 @@ def compute_recommendation(ticker, max_expiries=6):
 
             # compute mids for earliest expiry for the straddle
             if i == 0:
-                c_mid = _mid(c_bid, c_ask)
-                p_mid = _mid(p_bid, p_ask)
+                c_mid = mid(c_bid, c_ask)
+                p_mid = mid(p_bid, p_ask)
                 if c_mid is not None and p_mid is not None:
                     straddle_mid = c_mid + p_mid
             if c_iv is not None and p_iv is not None:

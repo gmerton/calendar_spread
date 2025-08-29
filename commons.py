@@ -2,9 +2,15 @@ import numpy as np
 from scipy.interpolate import interp1d
 from datetime import datetime, timedelta
 
+
+def mid(bid, ask):
+    return (bid+ask)/2.0 if (bid and ask and bid>0 and ask>0) else None
+
+
 def nearest_strike_contract(contracts, spot, cp):
     """
     Pick the contract dict from _list_contracts_for_expiry nearest to spot
+    cp can be 'call' or 'put'
     """
     side = [c for c in contracts if c["type"]==cp]
     if not side:
@@ -52,7 +58,6 @@ def build_term_structure(days, ivs):
     return term_spline
 
 def yang_zhang(price_data, window=30, trading_periods=252, return_last_only=True):
-    print("Price data", price_data);
     log_ho = (price_data['High'] / price_data['Open']).apply(np.log)
     log_lo = (price_data['Low'] / price_data['Open']).apply(np.log)
     log_co = (price_data['Close'] / price_data['Open']).apply(np.log)

@@ -38,7 +38,7 @@ def main_gui():
 
             def worker():
                 try:
-                    result = p_compute_recommendation(stock)
+                    result = y_compute_recommendation(stock)
                     result_holder['result'] = result
                 except Exception as e:
                     result_holder['error'] = str(e)
