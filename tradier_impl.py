@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Any
 import os, asyncio
 import aiohttp
 from commons import mid, yang_zhang, build_term_structure, filter_dates, nearest_strike_contract
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 import time
 import math
 import pandas as pd
@@ -311,66 +311,73 @@ async def _get_stock_history_df(
         if close_session:
             await session.close()
 
-async def compute_recommendation(ticker, max_expiries=6):
+async def compute_recommendation(ticker: str, max_expiries: int = 6):
     print(f"Computing recommendation for {ticker}")
     try:
         symbol = (ticker or "").strip().upper()
         if not symbol:
             return "No stock symbol provided."
 
-        # 1) Get current stock price
-        spot = await _get_underlying_price(symbol)  # assumes your IB version
+        # 1) Spot price
+        spot = await _get_underlying_price(symbol)
         print(f"1. Underlying price = {spot}")
         if spot is None:
             return "Error: unable to retrieve stock price"
-        
-        # 2) Expirations -> Filter -> cap
-        expirations = await _list_expirations(symbol)  # returns e.g. ['YYYY-MM-DD', ...]
+
+        # 2) Expirations -> filter -> cap
+        expirations = await _list_expirations(symbol)
         if not expirations:
             return f"Error: no options found for symbol {symbol}"
+
         try:
-            exp_dates = filter_dates(expirations)
+            exp_dates = filter_dates(expirations)  # your existing helper
         except Exception:
             return "Error: not enough option data"
         exp_dates = exp_dates[:max_expiries]
         print(f"2. Retrieved expiration dates within the next 45 days")
-        
-        # 3) For each expiry, choose ATM call/put and fetch bid/ask and IV
-        atm_iv = {}
-        straddle_mid = None
+
+        # 3) For each expiry, choose ATM call/put, collect IVs, and straddle mid for the earliest
+        atm_iv: Dict[str, float] = {}
+        straddle_mid: Optional[float] = None
+
         for i, exp in enumerate(exp_dates):
             print(f"3. {i}, {exp}")
-            contracts = await _list_contracts_for_expiry(symbol, exp)  
+            contracts = await _list_contracts_for_expiry(symbol, exp)  # greeks included by default
             if not contracts:
                 continue
-
+            for c in contracts:
+                if "option_type" in c:
+                    c["type"] = c.pop("option_type")
             call_ctr = nearest_strike_contract(contracts, spot, "call")
             put_ctr  = nearest_strike_contract(contracts, spot, "put")
-
             print(f"Nearest strike contract for {exp}", call_ctr)
 
             if not call_ctr or not put_ctr:
                 continue
 
             print(f"Found nearest strike (in abs val) contracts for exp {exp}")
-            # ✅ updated calls: (ib, symbol, expiry, strike, right)
-            c_bid, c_ask, c_iv = _get_option_quote_greeks(ib, symbol, exp, call_ctr["strike"], "C")
-            p_bid, p_ask, p_iv = _get_option_quote_greeks(ib, symbol, exp, put_ctr["strike"], "P")
 
-            print("Implied volatilties", c_iv, p_iv)
+            # Pull quotes directly from the contract list
+            c_bid, c_ask = call_ctr.get("bid"), call_ctr.get("ask")
+            p_bid, p_ask = put_ctr.get("bid"),  put_ctr.get("ask")
+            c_iv = _iv_from_greeks(call_ctr.get("greeks"))
+            p_iv = _iv_from_greeks(put_ctr.get("greeks"))
+            print("Implied volatilities", c_iv, p_iv)
 
-            # compute mids for earliest expiry for the straddle
+            # Earliest expiry: compute straddle mid from mids of call/put
             if i == 0:
                 c_mid = mid(c_bid, c_ask)
                 p_mid = mid(p_bid, p_ask)
                 if c_mid is not None and p_mid is not None:
                     straddle_mid = c_mid + p_mid
+
             if c_iv is not None and p_iv is not None:
-                atm_iv[exp] = (c_iv + p_iv) / 2.0;
-            
-            print(f"Implied volatilities", atm_iv)
+                atm_iv[exp] = (c_iv + p_iv) / 2.0
+
+            print("Implied volatilities (avg by expiry so far)", atm_iv)
+
         if not atm_iv:
-            print("errror 1`")
+            print("error 1")
             return "Error: Could not determin ATM IV for any expiration dates"
         print(f"3. atm_iv={atm_iv}")
 
@@ -378,27 +385,49 @@ async def compute_recommendation(ticker, max_expiries=6):
         today = datetime.now(timezone.utc).date()
         dtes, ivs = [], []
         for exp, iv in atm_iv.items():
-            d=datetime.strptime(exp, "%Y-%m-%d").date()
-            dtes.append((d-today).days)
+            d = datetime.strptime(exp, "%Y-%m-%d").date()
+            dtes.append((d - today).days)
             ivs.append(float(iv))
 
-        if len(dtes)<2:
+        if len(dtes) < 2:
             return "Error: Not enough expirations to build term structure."
-        term_spline = build_term_structure(dtes,ivs);
-        ts_slope_0_45 = (term_spline(45) - term_spline(min(dtes))) / (45-min(dtes))
 
-        print(f"4. ts_slope_0_45=${ts_slope_0_45}")
+        term_spline = build_term_structure(dtes, ivs)
+        ts_slope_0_45 = (term_spline(45) - term_spline(min(dtes))) / (45 - min(dtes))
+        print(f"4. ts_slope_0_45={ts_slope_0_45}")
 
         # 5) Daily OHLCV (~3 months) for Yang-Zhang + avg vol
-        price_history = _get_stock_history_df(ib, symbol, days=100)
-        if price_history.empty:
+        start = today - timedelta(days=100)
+        hist_df = await _get_stock_history_df(symbol, start=start.isoformat(), interval="daily")
+
+        if hist_df is None or hist_df.empty:
             return "Error: no historical data"
-        iv30_rv30 = term_spline(30) / yang_zhang(price_history)
-        avg_volume = price_history["Volume"].rolling(30).mean().dropna().iloc[-1]
-        expected_move = f"{round(straddle_mid / spot * 100, 2)}%" if straddle_mid else None
+
+        # Standardize columns so your existing code works
+        df = hist_df.copy()
+        # Ensure both lower- and Upper-case variants are available
+        if "Open" not in df.columns:
+            df["Open"] = df.get("open")
+        if "High" not in df.columns:
+            df["High"] = df.get("high")
+        if "Low" not in df.columns:
+            df["Low"] = df.get("low")
+        if "Close" not in df.columns:
+            df["Close"] = df.get("close")
+        if "Volume" not in df.columns:
+            # our history df uses 'volume'
+            df["Volume"] = df.get("volume")
+
+        # Yang-Zhang realized vol (your existing function)
+        rv30 = yang_zhang(df)
+        iv30 = float(term_spline(30))
+        iv30_rv30 = iv30 / rv30 if rv30 else float("inf")
+
+        avg_volume = df["Volume"].rolling(30).mean().dropna().iloc[-1]
+        expected_move = f"{round((straddle_mid / spot) * 100, 2)}%" if straddle_mid else None
 
         print("")
-        if avg_volume>=MINIMUM_VOLUME:
+        if avg_volume >= MINIMUM_VOLUME:
             print(f"GREEN.  Avg volume of {round(avg_volume)} exceeds the minimum of {MINIMUM_VOLUME}")
         else:
             print(f"RED.  Avg volume of {round(avg_volume)} is below the minimum of {MINIMUM_VOLUME}")
@@ -408,26 +437,41 @@ async def compute_recommendation(ticker, max_expiries=6):
         else:
             print(f"RED. iv_to_rv of {iv30_rv30} is below the minimum of {MINIMUM_IV_RV_RATIO}")
 
-        if ts_slope_0_45<=MAXIMUM_TERM_STRUCTURE_SLOPE:
+        if ts_slope_0_45 <= MAXIMUM_TERM_STRUCTURE_SLOPE:
             print(f"GREEN.  Term structure slope of {ts_slope_0_45} falls below the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
         else:
             print(f"RED.  Term structure slope of {ts_slope_0_45} exceeds the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
         print("")
 
         resultPackage = {
-                "avg_volume" : avg_volume>=MINIMUM_VOLUME,
-                "iv30_rv30" : iv30_rv30 >= MINIMUM_IV_RV_RATIO,
-                "ts_slope_0_45" : ts_slope_0_45 <= MAXIMUM_TERM_STRUCTURE_SLOPE,
-                "expected_move": expected_move
-            }
-            
+            "avg_volume": avg_volume >= MINIMUM_VOLUME,
+            "iv30_rv30": iv30_rv30 >= MINIMUM_IV_RV_RATIO,
+            "ts_slope_0_45": ts_slope_0_45 <= MAXIMUM_TERM_STRUCTURE_SLOPE,
+            "expected_move": expected_move,
+        }
         print(resultPackage)
+        return resultPackage
 
-        return resultPackage;
     except Exception as e:
         import traceback
         traceback.print_exc()
         return f"{ticker}: Processing failed: {e}"
+
+
+def _iv_from_greeks(g: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Pick a sensible IV from Tradier greeks payload."""
+    if not g:
+        return None
+    for key in ("mid_iv", "smv_vol", "bid_iv", "ask_iv"):
+        v = g.get(key)
+        if v is not None:
+            try:
+                v = float(v)
+                if v > 0:
+                    return v
+            except Exception:
+                pass
+    return None
 
 async def test():
     # price = await _get_underlying_price_tradier("AMZN")
@@ -436,8 +480,9 @@ async def test():
     # print(expirations)
     # contracts = await _list_contracts_for_expiry("AMZN", "2025-09-05")
     # print(contracts)
-    df = await _get_stock_history_df("AMZN")
-    print(df.head())
+    # df = await _get_stock_history_df("AMZN")
+    # print(df.head())
+    await compute_recommendation("AMZN")
     
     
 

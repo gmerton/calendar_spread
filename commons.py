@@ -12,6 +12,7 @@ def nearest_strike_contract(contracts, spot, cp):
     Pick the contract dict from _list_contracts_for_expiry nearest to spot
     cp can be 'call' or 'put'
     """
+    print(contracts)
     side = [c for c in contracts if c["type"]==cp]
     if not side:
         return None
