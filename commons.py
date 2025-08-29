@@ -2,6 +2,15 @@ import numpy as np
 from scipy.interpolate import interp1d
 from datetime import datetime, timedelta
 
+def nearest_strike_contract(contracts, spot, cp):
+    """
+    Pick the contract dict from _list_contracts_for_expiry nearest to spot
+    """
+    side = [c for c in contracts if c["type"]==cp]
+    if not side:
+        return None
+    return min(side, key=lambda c: abs(c["strike"]-spot))
+
 def filter_dates(dates):
     today = datetime.today().date()
     cutoff_date = today + timedelta(days=45)

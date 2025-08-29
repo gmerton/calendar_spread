@@ -1,10 +1,12 @@
+# Issue is we can't get bid and asks without a $199 sub.  Still a chance with Tradier or IBKR
+
 import os
 import time
 import sys
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from commons import yang_zhang, build_term_structure, filter_dates
+from commons import yang_zhang, build_term_structure, filter_dates, nearest_strike_contract
 
 POLYGON_API_KEY=os.getenv("POLYGON_API_KEY")
 BASE_V3 = "https://api.polygon.io/v3"
@@ -52,7 +54,7 @@ def _get_option_quote_greeks(underlying, option_ticker):
     return bid, ask, iv
 
 """
-def _get_option_quote_greeks_legacy(underlying: str, option_ticker: str):
+def _get_option_quote_greeks(underlying: str, option_ticker: str):
    
     bid = ask = iv = None
 
@@ -103,14 +105,7 @@ def _get_option_quote_greeks_legacy(underlying: str, option_ticker: str):
 """
 
 
-def _nearest_strike_contract(contracts, spot, cp):
-    """
-    Pick the contract dict from _list_contracts_for_expiry nearest to spot
-    """
-    side = [c for c in contracts if c["type"]==cp]
-    if not side:
-        return None
-    return min(side, key=lambda c: abs(c["strike"]-spot))
+
 
 def _mid(bid, ask):
     return (bid+ask)/2.0 if (bid and ask and bid>0 and ask>0) else None
@@ -148,8 +143,8 @@ def compute_recommendation(ticker, max_expiries=6):
             contracts = _list_contracts_for_expiry(symbol, exp)
             if not contracts:
                 continue
-            call_ctr = _nearest_strike_contract(contracts, spot, "call")
-            put_ctr = _nearest_strike_contract(contracts, spot, "put")
+            call_ctr = nearest_strike_contract(contracts, spot, "call")
+            put_ctr = nearest_strike_contract(contracts, spot, "put")
             if not call_ctr or not put_ctr:
                 continue
             print(call_ctr)
