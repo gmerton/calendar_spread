@@ -18,6 +18,8 @@ MAXIMUM_TERM_STRUCTURE_SLOPE = -0.00406
 def _tradier_headers():
     return {"Authorization": f"Bearer {TRADIER_API_KEY}", "Accept": "application/json"}
 
+
+# Get the current price of the underlying stock.
 async def _get_underlying_price(
     ticker: str,
     *,
@@ -313,37 +315,22 @@ async def _get_stock_history_df(
         if close_session:
             await session.close()
 
-async def compute_recommendation(ticker: str, max_expiries: int = 6):
-    print(f"Computing recommendation for {ticker}")
+
+async def _get_filtered_expirations(symbol, max_expiries: int = 6):
+    expirations = await _list_expirations(symbol)
+    if not expirations:
+        return f"Error: no options found for symbol {symbol}"
     try:
-        symbol = (ticker or "").strip().upper()
-        if not symbol:
-            return "No stock symbol provided."
+        exp_dates = filter_dates(expirations)
+    except Exception:
+        return "Error: not enough option data"
+    return exp_dates[:max_expiries]
 
-        # 1) Spot price
-        spot = await _get_underlying_price(symbol)
-        print(f"1. Underlying price = {spot}")
-        if spot is None:
-            return "Error: unable to retrieve stock price"
-
-        # 2) Expirations -> filter -> cap
-        expirations = await _list_expirations(symbol)
-        if not expirations:
-            return f"Error: no options found for symbol {symbol}"
-
-        try:
-            exp_dates = filter_dates(expirations)  # your existing helper
-        except Exception:
-            return "Error: not enough option data"
-        exp_dates = exp_dates[:max_expiries]
-        print(f"2. Retrieved expiration dates within the next 45 days")
-
-        # 3) For each expiry, choose ATM call/put, collect IVs, and straddle mid for the earliest
-        atm_iv: Dict[str, float] = {}
-        straddle_mid: Optional[float] = None
-
-        for i, exp in enumerate(exp_dates):
-            print(f"3. {i}, {exp}")
+async def _get_atm_iv(symbol, spot, exp_dates):
+    atm_iv: Dict[str, float] = {}
+    # straddle_mid: Optional[float] = None
+      
+    for i, exp in enumerate(exp_dates):
             contracts = await _list_contracts_for_expiry(symbol, exp)  # greeks included by default
             if not contracts:
                 continue
@@ -357,16 +344,15 @@ async def compute_recommendation(ticker: str, max_expiries: int = 6):
             if not call_contract or not put_contract:
                 continue
 
-            print(f"Found nearest strike (in abs val) contracts for exp {exp}")
-
+            
             # Pull quotes directly from the contract list
             c_bid, c_ask = call_contract.get("bid"), call_contract.get("ask")
             p_bid, p_ask = put_contract.get("bid"),  put_contract.get("ask")
             c_iv = _iv_from_greeks(call_contract.get("greeks"))
             p_iv = _iv_from_greeks(put_contract.get("greeks"))
-            print("Implied volatilities", c_iv, p_iv)
+            
+            # Earliest expiry: compute straddle mid from mids of call/put.  
 
-            # Earliest expiry: compute straddle mid from mids of call/put
             if i == 0:
                 c_mid = mid(c_bid, c_ask)
                 p_mid = mid(p_bid, p_ask)
@@ -375,9 +361,37 @@ async def compute_recommendation(ticker: str, max_expiries: int = 6):
 
             if c_iv is not None and p_iv is not None:
                 atm_iv[exp] = (c_iv + p_iv) / 2.0
+        
 
-            print("Implied volatilities (avg by expiry so far)", atm_iv)
+    print("Implied volatilities", atm_iv, "straddle_mid (cost of atm straddle for nearest exp)", straddle_mid)
+    return atm_iv, straddle_mid
 
+async def compute_recommendation(ticker: str):
+    print(f"Computing recommendation for {ticker}")
+    try:
+        symbol = (ticker or "").strip().upper()
+        if not symbol:
+            return "No stock symbol provided."
+
+        # 1) Spot price of underlying stock
+        spot = await _get_underlying_price(symbol)
+        print(f"1. Underlying price = {spot}")
+        if spot is None:
+            return "Error: unable to retrieve stock price"
+
+        # 2) Get a list of option expiration dates within the next 45 days.
+        
+        exp_dates = await _get_filtered_expirations(symbol)
+
+
+        print(f"2. Retrieved option expiration dates within the next 45 days, subject to a max of 6")
+
+        # 3) For each expiry, choose ATM call/put, collect IVs, and straddle mid for the earliest
+        # atm_iv: Dict[str, float] = {}
+        straddle_mid: Optional[float] = None
+        print("3.  Getting IV for ATM strike for each expiration")
+        atm_iv, straddle_mid = await _get_atm_iv(symbol, spot, exp_dates)
+       
         if not atm_iv:
             print("error 1")
             return "Error: Could not determin ATM IV for any expiration dates"
