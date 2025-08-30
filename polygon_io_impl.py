@@ -272,6 +272,13 @@ def _list_expirations(ticker):
         url = next_url
     return sorted(expirations)
 
+def getAvgVol(ticker):
+    price_history = _get_stock_history_df(ticker)
+    avg_volume = price_history["Volume"].rolling(30).mean().dropna().iloc[-1]
+    print(f"Polygon IO Data size = {len(price_history)}")
+    return avg_volume
+        
+
 def _get_stock_history_df(ticker, days=100): 
     """
     Return ~3 months of dailys OHLCV as a DataFrame with columns:

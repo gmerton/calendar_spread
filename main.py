@@ -3,6 +3,7 @@
 from tkinter import Variable as _Variable
 from y_finance_impl import compute_recommendation as y_compute_recommendation
 from polygon_io_impl import compute_recommendation as p_compute_recommendation
+from tradier_impl import getAvgVol
 
 if hasattr(_Variable, "trace_add"):
     def _legacy_trace(self, mode, callback):

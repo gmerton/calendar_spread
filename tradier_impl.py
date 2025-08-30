@@ -244,6 +244,8 @@ async def _get_stock_history_df(
     if interval not in {"daily", "weekly", "monthly"}:
         raise ValueError("interval must be one of: 'daily', 'weekly', 'monthly'")
 
+    if start is None and end is None:
+        start = date.today() - timedelta(days=90)
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -348,20 +350,20 @@ async def compute_recommendation(ticker: str, max_expiries: int = 6):
             for c in contracts:
                 if "option_type" in c:
                     c["type"] = c.pop("option_type")
-            call_ctr = nearest_strike_contract(contracts, spot, "call")
-            put_ctr  = nearest_strike_contract(contracts, spot, "put")
-            print(f"Nearest strike contract for {exp}", call_ctr)
+            call_contract = nearest_strike_contract(contracts, spot, "call")
+            put_contract  = nearest_strike_contract(contracts, spot, "put")
+            # print(f"Nearest strike contract for {exp}", call_ctr)
 
-            if not call_ctr or not put_ctr:
+            if not call_contract or not put_contract:
                 continue
 
             print(f"Found nearest strike (in abs val) contracts for exp {exp}")
 
             # Pull quotes directly from the contract list
-            c_bid, c_ask = call_ctr.get("bid"), call_ctr.get("ask")
-            p_bid, p_ask = put_ctr.get("bid"),  put_ctr.get("ask")
-            c_iv = _iv_from_greeks(call_ctr.get("greeks"))
-            p_iv = _iv_from_greeks(put_ctr.get("greeks"))
+            c_bid, c_ask = call_contract.get("bid"), call_contract.get("ask")
+            p_bid, p_ask = put_contract.get("bid"),  put_contract.get("ask")
+            c_iv = _iv_from_greeks(call_contract.get("greeks"))
+            p_iv = _iv_from_greeks(put_contract.get("greeks"))
             print("Implied volatilities", c_iv, p_iv)
 
             # Earliest expiry: compute straddle mid from mids of call/put
@@ -478,13 +480,22 @@ async def test():
     # print(price)
     # expirations = await _list_expirations("AMZN")
     # print(expirations)
-    # contracts = await _list_contracts_for_expiry("AMZN", "2025-09-05")
+    #  contracts = await _list_contracts_for_expiry("AMZN", "2025-09-05")
     # print(contracts)
     # df = await _get_stock_history_df("AMZN")
     # print(df.head())
     await compute_recommendation("AMZN")
     
     
+async def getAvgVol(symbol):
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=100)
+    hist_df = await _get_stock_history_df(symbol, start=start.isoformat(), interval="daily")
+    print(f"tradier data size {len(hist_df)}")
+    avg_volume = hist_df["volume"].rolling(30).mean().dropna().iloc[-1]
+    return avg_volume
+        
+
 
 
 if __name__ == "__main__":
