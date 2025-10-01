@@ -404,16 +404,14 @@ async def compute_recommendation(ticker: str):
             dtes.append((d - today).days)
             ivs.append(float(iv))
 
-        print(dtes)
-        print(ivs)
-
+        
         if len(dtes) < 2:
             return "Error: Not enough expirations to build term structure."
 
         term_spline = build_term_structure(dtes, ivs)
         ts_slope_0_45 = (term_spline(45) - term_spline(min(dtes))) / (45 - min(dtes))
         
-        print(f"ts_slope = {term_spline(45)} - {term_spline(min(dtes))} / (45-{min(dtes)})")
+        print(f"ts_slope = ({term_spline(45)} - {term_spline(min(dtes))}) / (45-{min(dtes)})")
         
         print(f"4. ts_slope_0_45={ts_slope_0_45}")
 
@@ -454,14 +452,14 @@ async def compute_recommendation(ticker: str):
             print(f"RED.  Avg volume of {round(avg_volume)} is below the minimum of {MINIMUM_VOLUME}")
 
         if iv30_rv30 >= MINIMUM_IV_RV_RATIO:
-            print(f"GREEN. iv-to-rv of {iv30_rv30} exceeds the minimum of {MINIMUM_IV_RV_RATIO}")
+            print(f"GREEN. iv-to-rv of {round(iv30_rv30,3)} exceeds the minimum of {MINIMUM_IV_RV_RATIO}")
         else:
-            print(f"RED. iv_to_rv of {iv30_rv30} is below the minimum of {MINIMUM_IV_RV_RATIO}")
+            print(f"RED. iv_to_rv of {round(iv30_rv30,3)} is below the minimum of {MINIMUM_IV_RV_RATIO}")
 
         if ts_slope_0_45 <= MAXIMUM_TERM_STRUCTURE_SLOPE:
-            print(f"GREEN.  Term structure slope of {ts_slope_0_45} falls below the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
+            print(f"GREEN.  Term structure slope of {round(ts_slope_0_45,5)} falls below the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
         else:
-            print(f"RED.  Term structure slope of {ts_slope_0_45} exceeds the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
+            print(f"RED.  Term structure slope of {round(ts_slope_0_45,5)} exceeds the maximum of {MAXIMUM_TERM_STRUCTURE_SLOPE}")
         print("")
 
         resultPackage = {
@@ -470,7 +468,7 @@ async def compute_recommendation(ticker: str):
             "ts_slope_0_45": ts_slope_0_45 <= MAXIMUM_TERM_STRUCTURE_SLOPE,
             "expected_move": expected_move,
         }
-        print(resultPackage)
+       # print(resultPackage)
         return resultPackage
 
     except Exception as e:
@@ -494,24 +492,11 @@ def _iv_from_greeks(g: Optional[Dict[str, Any]]) -> Optional[float]:
                 pass
     return None
 
+
+#Enter one or more stock symbols here...
 async def test():
        await compute_recommendation("NKE")
        await compute_recommendation("ANGO")
        
-       
-          
-       
-       
-async def getAvgVol(symbol):
-    today = datetime.now(timezone.utc).date()
-    start = today - timedelta(days=100)
-    hist_df = await _get_stock_history_df(symbol, start=start.isoformat(), interval="daily")
-    print(f"tradier data size {len(hist_df)}")
-    avg_volume = hist_df["volume"].rolling(30).mean().dropna().iloc[-1]
-    return avg_volume
-        
-
-
-
 if __name__ == "__main__":
     asyncio.run(test())
