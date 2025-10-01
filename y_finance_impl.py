@@ -50,6 +50,7 @@ def compute_recommendation(ticker):
         
         try:
             underlying_price = get_current_price(stock)
+            print(f"underlying price = {underlying_price}")
             if underlying_price is None:
                 raise ValueError("No market price found.")
         except Exception:
@@ -94,6 +95,7 @@ def compute_recommendation(ticker):
 
                 if call_mid is not None and put_mid is not None:
                     straddle = (call_mid + put_mid)
+                    print(f"Yahoo straddle = {straddle}")
 
             i += 1
         
@@ -103,6 +105,7 @@ def compute_recommendation(ticker):
         today = datetime.today().date()
         dtes = []
         ivs = []
+        print(f"Yahoo atm_iv={atm_iv}")
         for exp_date, iv in atm_iv.items():
             exp_date_obj = datetime.strptime(exp_date, "%Y-%m-%d").date()
             days_to_expiry = (exp_date_obj - today).days
@@ -114,11 +117,18 @@ def compute_recommendation(ticker):
         ts_slope_0_45 = (term_spline(45) - term_spline(dtes[0])) / (45-dtes[0])
         
         price_history = stock.history(period='3mo')
-        iv30_rv30 = term_spline(30) / yang_zhang(price_history)
+
+        yz_vol = yang_zhang(price_history)
+        iv30 = term_spline(30)
+        
+        iv30_rv30 = iv30 / yz_vol
+        print(f"Yahoo yz vol =  {yz_vol}, iv30={iv30}, iv30_rv30 = {iv30_rv30}")
 
         avg_volume = price_history['Volume'].rolling(30).mean().dropna().iloc[-1]
 
         expected_move = str(round(straddle / underlying_price * 100,2)) + "%" if straddle else None
+        
+        print(f"avg_vol={avg_volume}")
         print("iv30_rv30", iv30_rv30)
         print("ts_slope_0_45", ts_slope_0_45)
         return {'avg_volume': avg_volume >= 1500000, 'iv30_rv30': iv30_rv30 >= 1.25, 'ts_slope_0_45': ts_slope_0_45 <= -0.00406, 'expected_move': expected_move} #Check that they are in our desired range (see video)

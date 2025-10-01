@@ -394,9 +394,8 @@ async def compute_recommendation(ticker: str):
        
         if not atm_iv:
             print("error 1")
-            return "Error: Could not determin ATM IV for any expiration dates"
-        print(f"3. atm_iv={atm_iv}")
-
+            return "Error: Could not determine ATM IV for any expiration dates"
+        
         # 4) Build term structure spline and slope
         today = datetime.now(timezone.utc).date()
         dtes, ivs = [], []
@@ -405,11 +404,17 @@ async def compute_recommendation(ticker: str):
             dtes.append((d - today).days)
             ivs.append(float(iv))
 
+        print(dtes)
+        print(ivs)
+
         if len(dtes) < 2:
             return "Error: Not enough expirations to build term structure."
 
         term_spline = build_term_structure(dtes, ivs)
         ts_slope_0_45 = (term_spline(45) - term_spline(min(dtes))) / (45 - min(dtes))
+        
+        print(f"ts_slope = {term_spline(45)} - {term_spline(min(dtes))} / (45-{min(dtes)})")
+        
         print(f"4. ts_slope_0_45={ts_slope_0_45}")
 
         # 5) Daily OHLCV (~3 months) for Yang-Zhang + avg vol
@@ -441,7 +446,7 @@ async def compute_recommendation(ticker: str):
 
         avg_volume = df["Volume"].rolling(30).mean().dropna().iloc[-1]
         expected_move = f"{round((straddle_mid / spot) * 100, 2)}%" if straddle_mid else None
-
+        print(f"expected_move = straddle_mid / spot = {straddle_mid} / {spot} = {expected_move}")
         print("")
         if avg_volume >= MINIMUM_VOLUME:
             print(f"GREEN.  Avg volume of {round(avg_volume)} exceeds the minimum of {MINIMUM_VOLUME}")
@@ -490,17 +495,13 @@ def _iv_from_greeks(g: Optional[Dict[str, Any]]) -> Optional[float]:
     return None
 
 async def test():
-    # price = await _get_underlying_price_tradier("AMZN")
-    # print(price)
-    # expirations = await _list_expirations("AMZN")
-    # print(expirations)
-    #  contracts = await _list_contracts_for_expiry("AMZN", "2025-09-05")
-    # print(contracts)
-    # df = await _get_stock_history_df("AMZN")
-    # print(df.head())
-    await compute_recommendation("AMZN")
-    
-    
+       await compute_recommendation("NKE")
+       await compute_recommendation("ANGO")
+       
+       
+          
+       
+       
 async def getAvgVol(symbol):
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=100)
