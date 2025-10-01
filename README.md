@@ -13,7 +13,7 @@ Issue: Yahoo Finance has pretty strict API rate limits, so we need to find somet
 
 Store your Tradier API access token as an environment variable:
 
-`export TRADIER_API_KEY="your-real-key-here`
+`export TRADIER_API_KEY="your-real-key-here"`
 
 ## Launching the App
 
