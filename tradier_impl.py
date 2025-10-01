@@ -5,12 +5,12 @@ import os, asyncio
 import aiohttp
 from commons import mid, yang_zhang, build_term_structure, filter_dates, nearest_strike_contract
 from datetime import datetime, timedelta, timezone, date
-import time
-import math
 import pandas as pd
 
 TRADIER_BASE = "https://api.tradier.com/v1"
 TRADIER_API_KEY = os.getenv("TRADIER_API_KEY")
+
+# Thresholds.
 MINIMUM_VOLUME = 1_500_000
 MINIMUM_IV_RV_RATIO = 1.25
 MAXIMUM_TERM_STRUCTURE_SLOPE = -0.00406
