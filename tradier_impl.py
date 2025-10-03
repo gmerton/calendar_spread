@@ -495,8 +495,7 @@ def _iv_from_greeks(g: Optional[Dict[str, Any]]) -> Optional[float]:
 
 #Enter one or more stock symbols here...
 async def test():
-       await compute_recommendation("NKE")
-       await compute_recommendation("ANGO")
+       await compute_recommendation("AEHR")
        
 if __name__ == "__main__":
     asyncio.run(test())

@@ -19,9 +19,9 @@ Store your Tradier API access token as an environment variable:
 
 ```
 cd /path/to/script
-pip install -r requirements.txt
 python3 -m venv venv
 source venv/bin/activate
+pip install -r requirements.txt
 ```
 
 Prior to running the app, enter the stock tickers you want to analyze in this snippet near the bottom of the file `tradier_impl.py`
