@@ -29,8 +29,8 @@ Prior to running the app, enter the stock tickers you want to analyze in this sn
 ```
 #Enter one or more stock symbols here...
 async def test():
-       await compute_recommendation("NKE")
-       await compute_recommendation("ANGO")
+       goodList = []
+       tickers = ["HON", "DOW", "LUV","MBLY", "VKTX" ]
 ```
 
 Then run the code with the command:

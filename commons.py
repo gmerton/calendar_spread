@@ -18,7 +18,6 @@ def nearest_strike_contract(contracts, spot, cp):
     return min(side, key=lambda c: abs(c["strike"]-spot))
 
 def filter_dates(dates):
-    print(f"Unfiltered dates={dates}")
     today = datetime.today().date()
     cutoff_date = today + timedelta(days=45)
     
